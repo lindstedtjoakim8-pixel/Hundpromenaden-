@@ -8,14 +8,10 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap" rel="stylesheet">
 
-<!-- Firebase -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import { getDatabase, ref, set, onValue, remove, onDisconnect } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 
-// ─────────────────────────────────────────────
-// 🔧 FYLL I DINA FIREBASE-UPPGIFTER HÄR
-// ─────────────────────────────────────────────
 const firebaseConfig = {
   apiKey:            "AIzaSyBthC6xOl3WL4fAGzbtG6QD0qNj0bF3uZM",
   authDomain:        "hundpromenaden-cbee7.firebaseapp.com",
@@ -26,12 +22,10 @@ const firebaseConfig = {
   appId:             "1:1074566588410:web:9612c46372214c9e1fe643",
   measurementId:     "G-RDXPXCTC2V"
 };
-// ─────────────────────────────────────────────
 
 const app = initializeApp(firebaseConfig);
 const db  = getDatabase(app);
 
-// ── State ──
 let myId       = null;
 let myName     = null;
 let myDog      = null;
@@ -41,19 +35,18 @@ let mySize     = null;
 let myStatus   = "idle";
 let watchId    = null;
 let myMarker   = null;
+let lastLat    = null;   // ← spara senaste kända position
+let lastLng    = null;
 const otherMarkers = {};
 
-// ── Map ──
 const map = L.map("map", { center: [62, 15], zoom: 5, zoomControl: true, attributionControl: false });
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19 }).addTo(map);
 
-// ── Listen for other walkers ──
 function startListening() {
   const walkersRef = ref(db, "walkers");
   onValue(walkersRef, snapshot => {
     const data = snapshot.val() || {};
 
-    // Remove markers for users no longer present
     Object.keys(otherMarkers).forEach(id => {
       if (!data[id] || id === myId) {
         map.removeLayer(otherMarkers[id]);
@@ -61,28 +54,33 @@ function startListening() {
       }
     });
 
-    // Update / add markers
     Object.entries(data).forEach(([id, w]) => {
       if (id === myId) return;
       const latlng = [w.lat, w.lng];
       const genderTag = w.gender === "tik"
         ? `<span style="color:#E91E8C;font-weight:800">♀ Tik</span>`
         : `<span style="color:#1976D2;font-weight:800">♂ Hanhund</span>`;
+      const statusLabel = w.status === "walking"
+        ? "🦮 Ute på promenad"
+        : w.status === "soon"
+        ? "⏰ Ska ut snart"
+        : "";
       const popupHtml = `
         <div style="font-family:Nunito,sans-serif;min-width:160px">
           <div style="font-size:15px;font-weight:900;margin-bottom:3px">${w.name} & ${w.dog}</div>
           <div style="font-size:12px;color:#888;margin-bottom:6px">${w.breed} · ${w.size} · ${genderTag}</div>
-          <div style="font-size:12px;margin-bottom:6px">
-            ${w.status === "walking" ? "🦮 Ute på promenad" : "⏰ Ska ut snart"}
-          </div>
+          <div style="font-size:12px;margin-bottom:6px">${statusLabel}</div>
           ${w.open ? `<button onclick="window.sendJoinRequest('${id}','${w.name}')" style="background:#4CAF7D;color:white;border:none;border-radius:10px;padding:6px 14px;font-family:Nunito,sans-serif;font-size:12px;font-weight:800;cursor:pointer;width:100%">🐾 Häng med</button>` : `<div style="font-size:11px;color:#aaa">🚶 Ensam idag</div>`}
         </div>`;
 
       const color = w.gender === "tik" ? "#E91E8C" : "#1976D2";
+      const statusDot = w.status === "soon"
+        ? `<div style="position:absolute;top:-4px;right:-4px;width:14px;height:14px;background:#9B59B6;border-radius:50%;border:2px solid white;font-size:8px;display:flex;align-items:center;justify-content:center">⏰</div>`
+        : "";
       const html = `
         <div style="position:relative">
-          <div style="background:white;border-radius:50px;padding:5px 10px 5px 6px;display:flex;align-items:center;gap:5px;box-shadow:0 3px 14px rgba(0,0,0,0.18);border:2.5px solid ${color};white-space:nowrap;font-family:Nunito,sans-serif;cursor:pointer">
-            <span style="font-size:19px">🐕</span>
+          <div style="background:white;border-radius:50px;padding:5px 10px 5px 6px;display:flex;align-items:center;gap:5px;box-shadow:0 3px 14px rgba(0,0,0,0.18);border:2.5px solid ${color};white-space:nowrap;font-family:Nunito,sans-serif;cursor:pointer;opacity:${w.status === 'soon' ? '0.8' : '1'}">
+            <span style="font-size:19px">${w.status === 'soon' ? '⏰' : '🐕'}</span>
             <span style="font-size:12px;font-weight:800;color:#1A1A2E">${w.name}</span>
             <span style="font-size:10px;color:${color};font-weight:800">${w.gender === "tik" ? "♀" : "♂"}</span>
           </div>
@@ -104,7 +102,6 @@ function startListening() {
   });
 }
 
-// ── Update own position in Firebase ──
 function pushPosition(lat, lng) {
   if (!myId) return;
   set(ref(db, `walkers/${myId}`), {
@@ -116,14 +113,57 @@ function pushPosition(lat, lng) {
   });
 }
 
-// ── Start GPS tracking ──
+// ── "Ska ut snart" – spara i Firebase med position ──
+function pushSoonStatus() {
+  if (!myId) return;
+
+  const saveToFirebase = (lat, lng) => {
+    lastLat = lat;
+    lastLng = lng;
+    set(ref(db, `walkers/${myId}`), {
+      name: myName, dog: myDog, breed: myBreed,
+      gender: myGender, size: mySize,
+      status: "soon", open: true,
+      lat, lng,
+      updatedAt: Date.now()
+    });
+
+    // Uppdatera min markör på kartan
+    if (!myMarker) {
+      const html = `<div style="width:46px;height:46px;background:white;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:22px;box-shadow:0 3px 14px rgba(0,0,0,0.2);border:3px solid #9B59B6">⏰</div>`;
+      const icon = L.divIcon({ className: "", html, iconSize: [46, 46], iconAnchor: [23, 23] });
+      myMarker = L.marker([lat, lng], { icon, zIndexOffset: 1000 }).addTo(map);
+      map.flyTo([lat, lng], 15, { duration: 1.5 });
+    } else {
+      const html = `<div style="width:46px;height:46px;background:white;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:22px;box-shadow:0 3px 14px rgba(0,0,0,0.2);border:3px solid #9B59B6">⏰</div>`;
+      const icon = L.divIcon({ className: "", html, iconSize: [46, 46], iconAnchor: [23, 23] });
+      myMarker.setLatLng([lat, lng]).setIcon(icon);
+    }
+  };
+
+  // Använd senaste kända position om den finns
+  if (lastLat !== null) {
+    saveToFirebase(lastLat, lastLng);
+    return;
+  }
+
+  // Annars hämta GPS en gång
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(
+      pos => saveToFirebase(pos.coords.latitude, pos.coords.longitude),
+      () => showToast("⚠️ Kunde inte hämta position – syns ändå som 'Ska ut snart'")
+    );
+  }
+}
+
 function startTracking() {
   if (!navigator.geolocation) { showToast("❌ GPS stöds ej i den här webbläsaren"); return; }
   watchId = navigator.geolocation.watchPosition(pos => {
     const { latitude: lat, longitude: lng } = pos.coords;
+    lastLat = lat;
+    lastLng = lng;
     pushPosition(lat, lng);
 
-    // Update MY marker
     if (!myMarker) {
       const html = `<div style="width:46px;height:46px;background:white;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:22px;box-shadow:0 3px 14px rgba(0,0,0,0.2);border:3px solid #4CAF7D;position:relative">
         <div style="position:absolute;inset:-8px;border-radius:50%;border:2px solid #4CAF7D;opacity:0.4;animation:ring 2s infinite"></div>🧍
@@ -146,7 +186,6 @@ function stopTracking() {
   if (myMarker) { map.removeLayer(myMarker); myMarker = null; }
 }
 
-// ── Walkers bottom list ──
 function updateList(data) {
   const el = document.getElementById("walkers-scroll");
   el.innerHTML = "";
@@ -161,8 +200,8 @@ function updateList(data) {
     chip.className = "walker-chip";
     chip.innerHTML = `
       <div class="chip-avatar" style="border-color:${color}">
-        <span style="font-size:20px">🐕</span>
-        <div class="chip-dot walking"></div>
+        <span style="font-size:20px">${w.status === 'soon' ? '⏰' : '🐕'}</span>
+        <div class="chip-dot ${w.status === 'walking' ? 'walking' : 'soon-dot'}"></div>
       </div>
       <div class="chip-name">${w.name}</div>
       <div class="chip-dog">${w.dog} · <span style="color:${color};font-weight:700">${w.gender === "tik" ? "♀" : "♂"}</span></div>`;
@@ -174,13 +213,10 @@ function updateList(data) {
   });
 }
 
-// ── Join request ──
 window.sendJoinRequest = (toId, toName) => {
   showToast(`🐾 Skickade förfrågan till ${toName}!`);
-  // In a real app: push to Firebase notifications
 };
 
-// ── Toast ──
 function showToast(msg) {
   const t = document.getElementById("toast");
   t.textContent = msg;
@@ -188,7 +224,6 @@ function showToast(msg) {
   setTimeout(() => t.classList.remove("show"), 2800);
 }
 
-// ── Setup modal ──
 window.submitSetup = () => {
   const name   = document.getElementById("inp-name").value.trim();
   const dog    = document.getElementById("inp-dog").value.trim();
@@ -205,7 +240,6 @@ window.submitSetup = () => {
   mySize   = size;
   myId     = "user_" + Math.random().toString(36).slice(2, 10);
 
-  // Remove from DB on disconnect
   onDisconnect(ref(db, `walkers/${myId}`)).remove();
 
   document.getElementById("setup-modal").style.display = "none";
@@ -215,7 +249,6 @@ window.submitSetup = () => {
   startListening();
 };
 
-// ── Status button ──
 window.openStatusModal = () => {
   document.getElementById("status-modal").classList.add("open");
 };
@@ -229,35 +262,41 @@ window.setStatus = (s) => {
 
   if (s === "walking") {
     btn.className = "my-status-btn walking";
+    btn.style.background = "";
     emoji.textContent = "🦮"; text.textContent = "Ute nu";
+    // Stoppa eventuell gammal GPS-watch men behåll markören
+    if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+    if (myMarker) { map.removeLayer(myMarker); myMarker = null; }
     startTracking();
     showToast("🐾 Du syns nu på kartan!");
+
   } else if (s === "soon") {
+    // Stoppa GPS-tracking men ta INTE bort från Firebase
+    if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+    if (myMarker) { map.removeLayer(myMarker); myMarker = null; }
     btn.className = "my-status-btn";
     btn.style.background = "#9B59B6";
     emoji.textContent = "⏰"; text.textContent = "Snart ute";
-    stopTracking();
+    pushSoonStatus();   // ← FIXAT: sparar i Firebase med position
     showToast("⏰ Grannar ser att du ska ut snart!");
+
   } else {
     btn.className = "my-status-btn";
     btn.style.background = "";
     emoji.textContent = "🐕"; text.textContent = "Gå ut";
-    stopTracking();
+    stopTracking();     // tar bort från Firebase
     showToast("🏠 Du är nu hemma");
   }
 };
 
-// Close status modal on backdrop click
 document.getElementById("status-modal").addEventListener("click", function(e) {
   if (e.target === this) this.classList.remove("open");
 });
 
-// Show setup on load
 window.addEventListener("load", () => {
   document.getElementById("setup-modal").style.display = "flex";
 });
 
-// Cleanup on tab close
 window.addEventListener("beforeunload", stopTracking);
 </script>
 
@@ -269,8 +308,6 @@ window.addEventListener("beforeunload", stopTracking);
     --text:#1A1A2E; --muted:#9E9E9E; --border:rgba(0,0,0,0.08);
   }
   body { font-family:'Nunito',sans-serif; background:var(--bg); color:var(--text); height:100vh; display:flex; flex-direction:column; overflow:hidden; }
-
-  /* Header */
   #header { padding:14px 18px 12px; background:var(--card); border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; z-index:1000; }
   .header-left h1 { font-size:20px; font-weight:900; letter-spacing:-0.5px; line-height:1; }
   .header-left h1 span { color:var(--green); }
@@ -280,16 +317,12 @@ window.addEventListener("beforeunload", stopTracking);
   .my-status-btn:active:not(:disabled) { transform:scale(0.95); }
   .my-status-btn.walking { background:var(--orange); box-shadow:0 2px 8px rgba(242,153,74,0.35); animation:breathe 2s infinite; }
   @keyframes breathe { 0%,100%{box-shadow:0 2px 8px rgba(242,153,74,0.35)}50%{box-shadow:0 2px 18px rgba(242,153,74,0.6)} }
-
-  /* Map */
   #map { flex:1; z-index:1; }
   @keyframes ring { 0%{transform:scale(0.8);opacity:0.5}100%{transform:scale(1.4);opacity:0} }
   @keyframes blink { 0%,100%{opacity:1}50%{opacity:0.3} }
   .leaflet-control-zoom { border:none!important; }
   .leaflet-control-zoom a { background:white!important; color:var(--text)!important; border-radius:8px!important; border:1px solid var(--border)!important; box-shadow:0 2px 8px rgba(0,0,0,0.1)!important; font-size:16px!important; width:34px!important; height:34px!important; line-height:34px!important; }
   .leaflet-popup-content-wrapper { font-family:'Nunito',sans-serif; border-radius:14px!important; box-shadow:0 4px 20px rgba(0,0,0,0.15)!important; }
-
-  /* Bottom sheet */
   #bottom-sheet { background:var(--card); border-top:1px solid var(--border); border-radius:20px 20px 0 0; z-index:1000; box-shadow:0 -4px 20px rgba(0,0,0,0.08); }
   .sheet-handle { width:36px; height:4px; background:#DDD; border-radius:2px; margin:10px auto 0; }
   #walkers-list { padding:10px 14px 16px; }
@@ -300,14 +333,11 @@ window.addEventListener("beforeunload", stopTracking);
   .chip-avatar { width:44px; height:44px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:20px; border:2.5px solid; background:var(--bg); position:relative; transition:transform 0.2s; }
   .chip-dot { position:absolute; bottom:1px; right:1px; width:11px; height:11px; border-radius:50%; border:2px solid white; }
   .chip-dot.walking { background:var(--orange); animation:blink 1.5s infinite; }
+  .chip-dot.soon-dot { background:#9B59B6; }
   .chip-name { font-size:10px; font-weight:700; color:var(--text); text-align:center; }
   .chip-dog { font-size:9px; color:var(--muted); font-weight:600; }
-
-  /* Toast */
   #toast { position:fixed; top:80px; left:50%; transform:translateX(-50%) translateY(-20px); background:#1A1A2E; color:white; padding:10px 20px; border-radius:20px; font-size:13px; font-weight:700; z-index:9999; opacity:0; transition:all 0.3s; pointer-events:none; white-space:nowrap; }
   #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
-
-  /* Setup modal */
   #setup-modal { position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:9999; align-items:center; justify-content:center; padding:20px; display:none; }
   #setup-card { background:white; border-radius:24px; padding:24px 22px 28px; width:100%; max-width:400px; max-height:90vh; overflow-y:auto; }
   #setup-card h2 { font-size:22px; font-weight:900; margin-bottom:4px; }
@@ -324,8 +354,6 @@ window.addEventListener("beforeunload", stopTracking);
   .gender-opt input[value="hanhund"]:checked + label { border-color:#1976D2; background:rgba(25,118,210,0.06); color:#1976D2; }
   .submit-btn { width:100%; background:var(--green); color:white; border:none; border-radius:14px; padding:14px; font-family:'Nunito',sans-serif; font-size:15px; font-weight:900; cursor:pointer; margin-top:6px; box-shadow:0 3px 12px rgba(76,175,125,0.35); transition:transform 0.15s; }
   .submit-btn:active { transform:scale(0.97); }
-
-  /* Status modal */
   #status-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.4); z-index:9998; align-items:flex-end; justify-content:center; }
   #status-modal.open { display:flex; }
   #status-card { background:white; border-radius:24px 24px 0 0; padding:20px 20px 32px; width:100%; max-width:480px; animation:slideUp 0.3s ease; }
@@ -341,12 +369,10 @@ window.addEventListener("beforeunload", stopTracking);
 </head>
 <body>
 
-<!-- Setup modal -->
 <div id="setup-modal">
   <div id="setup-card">
     <h2>🐾 Välkommen!</h2>
     <p class="sub">Berätta om dig och din hund</p>
-
     <div class="field">
       <label>Ditt namn</label>
       <input id="inp-name" type="text" placeholder="T.ex. Anna" autocomplete="off">
@@ -384,7 +410,6 @@ window.addEventListener("beforeunload", stopTracking);
   </div>
 </div>
 
-<!-- Header -->
 <div id="header">
   <div class="header-left">
     <h1>🐾 Promen<span>ad</span></h1>
@@ -408,7 +433,6 @@ window.addEventListener("beforeunload", stopTracking);
 
 <div id="toast"></div>
 
-<!-- Status modal -->
 <div id="status-modal">
   <div id="status-card">
     <h3>Din status</h3>
@@ -419,7 +443,7 @@ window.addEventListener("beforeunload", stopTracking);
     </div>
     <div class="status-option" onclick="setStatus('soon')">
       <div class="opt-icon">⏰</div>
-      <div class="opt-text"><strong>Ska ut snart</strong><span>Utan GPS, bara ett meddelande</span></div>
+      <div class="opt-text"><strong>Ska ut snart</strong><span>Din position sparas, grannar ser dig</span></div>
     </div>
     <div class="status-option" onclick="setStatus('idle')">
       <div class="opt-icon">🏠</div>
